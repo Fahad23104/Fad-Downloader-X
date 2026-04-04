@@ -645,6 +645,7 @@ class IDMApp : public wxApp { public: virtual bool OnInit(); };
 class MainFrame : public wxFrame {
 public:
     MainFrame(const wxString& title);
+    void TriggerExternalURL(const std::string& url);
 
 private:
     void OnAdd(wxCommandEvent& event);
@@ -698,6 +699,10 @@ bool IDMApp::OnInit() {
     curl_global_init(CURL_GLOBAL_ALL);
     MainFrame* frame = new MainFrame("Fad Downloader-X");
     frame->Show(true);
+    if (argc > 1) {
+        std::string passed_url = std::string(argv[1].mb_str());
+        frame->TriggerExternalURL(passed_url);
+    }
     return true;
 }
 
@@ -1278,7 +1283,15 @@ void MainFrame::OnTimer(wxTimerEvent& event) {
         UpdateToolbarState();
     }
 }
-
+void MainFrame::TriggerExternalURL(const std::string& url) {
+    wxCommandEvent dummy;
+    // Put URL in clipboard so OnAdd naturally picks it up
+    if (wxTheClipboard->Open()) {
+        wxTheClipboard->SetData(new wxTextDataObject(url));
+        wxTheClipboard->Close();
+    }
+    OnAdd(dummy);
+}
 // FIX: Add standard main entry point to bypass Release Console/Windows subsystem mismatch
 #if defined(_MSC_VER)
 int main(int argc, char** argv) {
