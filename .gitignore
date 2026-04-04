@@ -1,0 +1,15 @@
+# Visual Studio Cache
+.vs/
+*.user
+
+# Build Folders
+x64/
+GUI_IDM/x64/
+
+# Compiled Binaries and Symbols
+*.exe
+*.dll
+*.pdb
+*.obj
+*.tlog
+*.log
