@@ -1,6 +1,6 @@
 // ==========================================
 //      FDX - FAD DOWNLOADER-X (MASTER BUILD)
-//      Fixes: File Truncation & Startup Bombing
+//      Fixes: GitHub S3 Ranges, Redirect Names
 // ==========================================
 
 #define _CRT_SECURE_NO_WARNINGS 
@@ -43,7 +43,7 @@
 const int NUM_THREADS = 8;
 const int SPEED_SAMPLES = 10;
 const size_t RAM_BUFFER_SIZE = 2 * 1024 * 1024;
-static std::atomic<int> g_id_counter(1000);
+static std::atomic<int> g_id_counter(1);
 
 bool g_is_dark_mode = false;
 HANDLE g_InstanceMutex = NULL;
@@ -111,18 +111,20 @@ struct FileInfo { long long size = 0; std::string filename = ""; std::string con
 static size_t info_header_parser(char* buffer, size_t size, size_t nitems, void* userdata) {
     std::string header(buffer, size * nitems); FileInfo* info = (FileInfo*)userdata; std::string lower = header;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    // FIX: Use lower.find for filename= to avoid Case-Sensitive misses
     if (lower.find("content-disposition:") != std::string::npos && lower.find("filename=") != std::string::npos) {
-        size_t pos = header.find("filename="); std::string raw = header.substr(pos + 9);
+        size_t pos = lower.find("filename="); std::string raw = header.substr(pos + 9);
         if (raw.front() == '"') raw = raw.substr(1);
         while (!raw.empty() && (raw.back() == '"' || raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' ')) raw.pop_back();
         info->filename = raw;
     }
     if (lower.find("content-type:") != std::string::npos) {
-        size_t pos = header.find(":"); if (pos != std::string::npos) { std::string ct = header.substr(pos + 1); ct.erase(0, ct.find_first_not_of(" \t\r\n")); ct.erase(ct.find_last_not_of(" \t\r\n") + 1); info->content_type = ct; }
+        size_t pos = lower.find(":"); if (pos != std::string::npos) { std::string ct = header.substr(pos + 1); ct.erase(0, ct.find_first_not_of(" \t\r\n")); ct.erase(ct.find_last_not_of(" \t\r\n") + 1); info->content_type = ct; }
     }
     if (lower.find("accept-ranges: none") != std::string::npos) info->supports_resume = false;
     if (lower.find("content-range:") != std::string::npos) {
-        size_t slash = header.find("/"); if (slash != std::string::npos) { std::string total = header.substr(slash + 1); total.erase(std::remove(total.begin(), total.end(), '\r'), total.end()); total.erase(std::remove(total.begin(), total.end(), '\n'), total.end()); try { info->size = std::stoll(total); } catch (...) {} }
+        size_t slash = lower.find("/"); if (slash != std::string::npos) { std::string total = header.substr(slash + 1); total.erase(std::remove(total.begin(), total.end(), '\r'), total.end()); total.erase(std::remove(total.begin(), total.end(), '\n'), total.end()); try { info->size = std::stoll(total); } catch (...) {} }
     }
     return size * nitems;
 }
@@ -137,18 +139,24 @@ FileInfo GetRobustFileInfo(const std::string& url) {
     curl_easy_perform(curl); long http_code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
     if (http_code != 206 && http_code != 200) {
-        info.supports_resume = false; curl_easy_setopt(curl, CURLOPT_RANGE, NULL); curl_easy_setopt(curl, CURLOPT_NOBODY, 0L); curl_easy_perform(curl);
+        // FIX: Proper HEAD fallback (NOBODY, 1L) to properly request missing sizes
+        info.supports_resume = false; curl_easy_setopt(curl, CURLOPT_RANGE, NULL); curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); curl_easy_perform(curl);
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code == 200) { curl_off_t cl = 0; curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl); if (cl > 0) info.size = (long long)cl; }
     }
     else if (http_code == 200) {
         info.supports_resume = false; curl_off_t cl = 0; curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl); if (cl > 0) info.size = (long long)cl;
     }
-    char* ct_ptr = NULL; curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct_ptr); if (ct_ptr) info.content_type = ct_ptr; curl_easy_cleanup(curl);
+    char* ct_ptr = NULL; curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct_ptr); if (ct_ptr) info.content_type = ct_ptr;
+
+    // FIX: Pull the Effective URL to correctly grab GitHub redirected AWS S3 Filenames
+    char* eff_url_ptr = NULL; curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &eff_url_ptr);
+    std::string final_url = eff_url_ptr ? eff_url_ptr : url;
+    curl_easy_cleanup(curl);
 
     if (info.filename.empty() || info.filename == "download.bin" || info.filename == "download") {
-        size_t slash = url.find_last_of("/"); std::string name = "download";
-        if (slash != std::string::npos) { name = url.substr(slash + 1); size_t qm = name.find("?"); if (qm != std::string::npos) name = name.substr(0, qm); }
+        size_t slash = final_url.find_last_of("/"); std::string name = "download";
+        if (slash != std::string::npos) { name = final_url.substr(slash + 1); size_t qm = name.find("?"); if (qm != std::string::npos) name = name.substr(0, qm); }
         if (name.length() > 50 || name.find(".") == std::string::npos) {
             std::string ext = ".bin"; std::string lower_ct = info.content_type; std::transform(lower_ct.begin(), lower_ct.end(), lower_ct.begin(), ::tolower);
             if (lower_ct.find("video/mp4") != std::string::npos) ext = ".mp4"; else if (lower_ct.find("video/x-matroska") != std::string::npos) ext = ".mkv";
@@ -160,8 +168,13 @@ FileInfo GetRobustFileInfo(const std::string& url) {
         }
         else { info.filename = name; }
     }
+
     std::string safe_name = info.filename; std::string invalid = "\\/:*?\"<>|";
     for (char c : invalid) safe_name.erase(std::remove(safe_name.begin(), safe_name.end(), c), safe_name.end());
+
+    // Quick URL Unescape for spaces
+    size_t pos = 0; while ((pos = safe_name.find("%20", pos)) != std::string::npos) { safe_name.replace(pos, 3, " "); pos += 1; }
+
     if (safe_name.empty()) safe_name = "download.bin";
     info.filename = safe_name; return info;
 }
@@ -199,7 +212,11 @@ void download_worker(int task_id, int thread_idx, FILE* shared_fp) {
     if (current > end) return; CURL* curl = curl_easy_init();
     if (curl && shared_fp) {
         setup_curl(curl); curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+
+        // FIX: Prevent 0KB Instant Complete by safely requesting the remaining file if size is unknown
         if (end != LLONG_MAX) { std::string range = std::to_string(current) + "-" + std::to_string(end); curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()); }
+        else { std::string range = std::to_string(current) + "-"; curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()); }
+
         WriteData wd = { shared_fp, task_id, thread_idx, current, std::vector<char>() }; wd.ram_buffer.reserve(RAM_BUFFER_SIZE + 1024);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback); curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wd); curl_easy_perform(curl);
         if (!wd.ram_buffer.empty()) { std::lock_guard<std::mutex> lock(disk_mutex); _fseeki64(wd.fp, wd.disk_offset, SEEK_SET); fwrite(wd.ram_buffer.data(), 1, wd.ram_buffer.size(), wd.fp); wd.ram_buffer.clear(); }
@@ -557,12 +574,8 @@ void MainFrame::OnTimer(wxTimerEvent& event) {
             }
             in.close();
 
-            // CRITICAL FIX: Truncate (empty) the file completely! 
-            // std::remove fails if Windows Defender or Chrome is locking the file, causing infinite loops!
             std::ofstream clear_file(queuePath, std::ios::trunc);
             clear_file.close();
-
-            // Still try to delete it just to keep the temp folder clean
             std::remove(queuePath.c_str());
 
             int added = 0;
