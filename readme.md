@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Inbox%20Tray.png" alt="FDX Logo" width="150"/>
+<img src="assets/logo.png" alt="FDX Logo" width="150"/>
 
 # 📥 Fad Downloader-X (FDX)
 
