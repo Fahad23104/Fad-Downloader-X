@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "FDX Integration",
+  "version": "4.0",
+  "description": "Smart Network Sniffing and DOM overlay to capture media streams.",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "nativeMessaging",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "48": "icon.png"
+  }
+}

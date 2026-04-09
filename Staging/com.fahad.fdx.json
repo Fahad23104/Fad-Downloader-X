@@ -1,0 +1,9 @@
+{
+  "name": "com.fahad.fdx",
+  "description": "FDX Download Bridge",
+  "path": "FDX_Bridge.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://ddlecifbfikpjmblbenngfilkmpjmmpf/"
+  ]
+}
