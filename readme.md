@@ -26,7 +26,7 @@
 <details>
 <summary><b>Click to view detailed screenshots</b></summary>
 
-### The Dark-Mode Dashboard
+### The Dashboard
 ![Dashboard](assets/screenshot1.png)
 
 ### The Chrome Sniffer Panel
@@ -106,7 +106,7 @@ You will need **Visual Studio 2022**, **wxWidgets**, and **libcurl**.
 
 ```bash
 # 1. Clone the repository
-git clone [https://github.com/Fahad23104/FDX.git](https://github.com/Fahad23104/FDX.git)
+git clone https://github.com/Fahad23104/Fad-Downloader-X
 
 # 2. Open the solution
 # Open GUI_IDM.sln in Visual Studio 2022.
