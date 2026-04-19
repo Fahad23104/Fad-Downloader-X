@@ -108,7 +108,7 @@ void SaveHistory() {
 void LoadHistory(wxListCtrl* listView) {
     std::ifstream in(GetHistoryPath());
     if (!in.is_open()) return;
-    std::string line; int max_id = 1000;
+    std::string line; int max_id = 0;
     std::lock_guard<std::mutex> lock(tasks_mutex);
     while (std::getline(in, line)) {
         auto parts = split_str(line, '\t');
