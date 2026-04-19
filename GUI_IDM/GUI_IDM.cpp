@@ -1,6 +1,6 @@
 // ==========================================
 //      FDX - FAD DOWNLOADER-X (MASTER BUILD)
-//      Fixes: Network Drops, Wi-Fi Switches & Persistent History
+//      Fixes: Auto-Retry Engine for Network Drops
 // ==========================================
 
 #define _CRT_SECURE_NO_WARNINGS 
@@ -13,7 +13,7 @@
 
 #include <winsock2.h> 
 #include <windows.h> 
-#include <shlobj.h> // REQUIRED for Persistent History Directory
+#include <shlobj.h> 
 #include <wx/wx.h>
 #include <wx/listctrl.h>
 #include <wx/artprov.h>
@@ -55,7 +55,6 @@ std::string GetQueuePath() {
     return std::string(tempPath) + "fdx_queue.txt";
 }
 
-// --- HISTORY ENGINE ---
 std::string GetHistoryPath() {
     char appData[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appData))) {
@@ -164,7 +163,7 @@ void setup_curl(CURL* curl) {
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA); curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L); curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 512 * 1024L); curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
-    // FIX: Severs the connection if Wi-Fi drops and hits 0 bytes/s for 15 seconds (prevents freezing)
+    // Safety Net: Sever dead connections after 15 seconds of 0 bytes
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 15L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
 }
@@ -260,43 +259,54 @@ static size_t write_callback(void* ptr, size_t size, size_t nmemb, void* userdat
 }
 
 void download_worker(int task_id, int thread_idx, FILE* shared_fp) {
-    std::string url; long long start, end, current;
-    {
-        std::lock_guard<std::mutex> lock(tasks_mutex); std::shared_ptr<DownloadTask> task = nullptr;
-        for (auto& t : all_tasks) if (t->id == task_id) task = t;
-        if (!task || task->is_paused || task->error) return;
-        url = task->url; start = task->thread_states[thread_idx].start; end = task->thread_states[thread_idx].end; current = task->thread_states[thread_idx].current;
-    }
-    if (current > end) return; CURL* curl = curl_easy_init();
-    if (curl && shared_fp) {
-        setup_curl(curl); curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        if (end != LLONG_MAX) { std::string range = std::to_string(current) + "-" + std::to_string(end); curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()); }
-        else { std::string range = std::to_string(current) + "-"; curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()); }
-
-        WriteData wd = { shared_fp, task_id, thread_idx, current, std::vector<char>() }; wd.ram_buffer.reserve(RAM_BUFFER_SIZE + 1024);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback); curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wd);
-
-        CURLcode res = curl_easy_perform(curl);
-        if (!wd.ram_buffer.empty()) { std::lock_guard<std::mutex> lock(disk_mutex); _fseeki64(wd.fp, wd.disk_offset, SEEK_SET); fwrite(wd.ram_buffer.data(), 1, wd.ram_buffer.size(), wd.fp); wd.ram_buffer.clear(); }
-
-        // FIX: Verify if the download TRULY completed or if the Wi-Fi just disconnected and severed the stream
-        bool thread_error = false;
-        if (res != CURLE_OK) thread_error = true;
-
+    // FIX: The Master Auto-Retry Engine
+    while (true) {
+        std::string url; long long start, end, current;
         {
             std::lock_guard<std::mutex> lock(tasks_mutex); std::shared_ptr<DownloadTask> task = nullptr;
             for (auto& t : all_tasks) if (t->id == task_id) task = t;
-            if (task && !task->is_paused) {
-                if (!thread_error) {
-                    long long final_current = task->thread_states[thread_idx].current;
-                    long long expected_end = task->thread_states[thread_idx].end;
-                    // If libcurl finished, but we didn't receive all the bytes, it was a Wi-Fi drop!
-                    if (expected_end != LLONG_MAX && final_current <= expected_end) thread_error = true;
+            if (!task || task->is_paused || task->error) return; // Exit completely if user paused
+            url = task->url; start = task->thread_states[thread_idx].start; end = task->thread_states[thread_idx].end; current = task->thread_states[thread_idx].current;
+        }
+        if (current > end) return; // Thread finished successfully
+
+        CURL* curl = curl_easy_init();
+        CURLcode res = CURLE_FAILED_INIT;
+        if (curl && shared_fp) {
+            setup_curl(curl); curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            if (end != LLONG_MAX) { std::string range = std::to_string(current) + "-" + std::to_string(end); curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()); }
+            else { std::string range = std::to_string(current) + "-"; curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()); }
+
+            WriteData wd = { shared_fp, task_id, thread_idx, current, std::vector<char>() }; wd.ram_buffer.reserve(RAM_BUFFER_SIZE + 1024);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback); curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wd);
+
+            res = curl_easy_perform(curl);
+            if (!wd.ram_buffer.empty()) { std::lock_guard<std::mutex> lock(disk_mutex); _fseeki64(wd.fp, wd.disk_offset, SEEK_SET); fwrite(wd.ram_buffer.data(), 1, wd.ram_buffer.size(), wd.fp); wd.ram_buffer.clear(); }
+            curl_easy_cleanup(curl);
+        }
+
+        // Verify Network Integrity & Determine if we need to auto-retry
+        bool should_retry = false;
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex); std::shared_ptr<DownloadTask> task = nullptr;
+            for (auto& t : all_tasks) if (t->id == task_id) task = t;
+            if (task && !task->is_paused && !task->error) {
+                long long final_current = task->thread_states[thread_idx].current;
+                long long expected_end = task->thread_states[thread_idx].end;
+
+                // If we got disconnected before reaching our chunk boundary, wait and retry!
+                if (expected_end != LLONG_MAX && final_current <= expected_end) {
+                    should_retry = true;
                 }
-                if (thread_error) { task->error = true; task->is_paused = true; } // Safety pause
+                else if (expected_end == LLONG_MAX && res != CURLE_OK) {
+                    should_retry = true;
+                }
             }
         }
-        curl_easy_cleanup(curl);
+        if (!should_retry) break; // Finished gracefully! Exit the while loop.
+
+        // Anti-Spam: Wait 3 seconds for the Wi-Fi to stabilize before reconnecting
+        std::this_thread::sleep_for(std::chrono::seconds(3));
     }
 }
 
@@ -335,14 +345,7 @@ void StartTaskLogic(int task_id) {
     {
         std::lock_guard<std::mutex> lock(tasks_mutex); task->is_running = false;
         if (task->error) {
-            task->status_text = "Network Error - Paused";
-            if (task->size > 0) {
-                std::ofstream out(task->filename + ".idm");
-                if (out.is_open()) {
-                    out << task->url << "\n" << task->size << "\n" << task->downloaded << "\n" << task->active_threads << "\n";
-                    for (const auto& ts : task->thread_states) out << ts.start << " " << ts.end << " " << ts.current << "\n";
-                }
-            }
+            task->status_text = "System Error - Paused";
         }
         else if (!task->is_paused) {
             task->is_completed = true; task->status_text = "Complete";
@@ -361,7 +364,7 @@ void StartTaskLogic(int task_id) {
             }
         }
     }
-    SaveHistory(); // Triggers the hard drive to remember the changes
+    SaveHistory();
 }
 
 // ==========================================
@@ -548,7 +551,7 @@ MainFrame::MainFrame(const wxString& title) : wxFrame(NULL, wxID_ANY, title, wxD
     wxBoxSizer* mainSizer = new wxBoxSizer(wxVERTICAL); mainSizer->Add(topHeaderPanel, 0, wxEXPAND); mainSizer->Add(customToolbarPanel, 0, wxEXPAND); mainSizer->Add(listView, 1, wxEXPAND | wxALL, 0); SetSizer(mainSizer);
     CreateStatusBar(); ApplyTheme(); UpdateToolbarState();
 
-    LoadHistory(listView); // Restores everything you downloaded before!
+    LoadHistory(listView);
 
     updateTimer = new wxTimer(this, ID_TIMER); updateTimer->Start(500);
 
